@@ -1,6 +1,4 @@
-using Unzip
-using Test
+using Unzip: Unzip
+using Documenter: doctest
 
-@testset "Unzip.jl" begin
-    # Write your tests here.
-end
+doctest(Unzip)

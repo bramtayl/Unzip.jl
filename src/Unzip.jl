@@ -152,8 +152,6 @@ function widen_column(iterator_size, new_length, an_index, ::Missing, ::Missing)
     Array{Missing}(missing, new_length)
 end
 
-widen_column(fixeds, variables) = widen_column(fixeds..., variables...)
-
 get_new_length(::SizeUnknown, rows, an_index) = an_index
 get_new_length(::HasLength, rows, an_index) = length(rows)
 

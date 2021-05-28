@@ -12,6 +12,8 @@ import Base:
     similar,
     size
 using Base:
+    EltypeUnknown,
+    HasEltype,
     HasLength,
     isvatuple,
     IteratorEltype,
@@ -85,12 +87,18 @@ function push!(rows::Rows, row)
     nothing
 end
 
-@pure val_fieldtypes(something) = ()
-@pure function val_fieldtypes(a_type::DataType)
-    if a_type.abstract || (a_type.name == Tuple.name && isvatuple(a_type))
-        ()
+# can we do any better?
+@pure function can_guess_column_types(_)
+    false
+end
+@pure function can_guess_column_types(row_type::DataType)
+    !(row_type.abstract || (row_type.name == Tuple.name && isvatuple(row_type)))
+end
+@pure function val_fieldtypes(row_type)
+    if can_guess_column_types(row_type)
+        map(Val, (row_type.types...,))
     else
-        map(Val, (a_type.types...,))
+        ()
     end
 end
 
@@ -119,7 +127,7 @@ function widen_column(
     @inbounds column[an_index] = item
     column
 end
-function widen_column(::HasLength, new_length, an_index, name, column::Array, item)
+function widen_column(::HasLength, new_length, an_index, column::Array, item)
     setindex_widen_up_to(column, item, an_index)
 end
 
@@ -220,10 +228,27 @@ julia> unzip(Iterators.filter(row -> true, Generator(unstable, 1:3)))
 
 julia> unzip(Iterators.filter(row -> false, Generator(unstable, 1:4)))
 ()
+
+julia> unzip(x for x in [(1, 2), ("a", "b")]) 
+(Any[1, "a"], Any[2, "b"])
+
+julia> unzip([(a=1, b=2), (a="a", b="b")])
+(Any[1, "a"], Any[2, "b"])
 ```
 """
 function unzip(rows)
-    _collect((@inbounds Rows(())), rows, IteratorEltype(rows), IteratorSize(rows)).columns
+    iterator_eltype = IteratorEltype(rows)
+    _collect(
+        (@inbounds Rows(())), 
+        rows, 
+        # if we can't guess the column types, ignore the eltype
+        if iterator_eltype isa HasEltype && !can_guess_column_types(eltype(rows))
+            EltypeUnknown()
+        else
+            iterator_eltype
+        end, 
+        IteratorSize(rows)
+    ).columns
 end
 
 export unzip

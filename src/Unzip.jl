@@ -15,6 +15,7 @@ using Base:
     EltypeUnknown,
     HasEltype,
     HasLength,
+    isabstracttype,
     isvatuple,
     IteratorEltype,
     IteratorSize,
@@ -92,7 +93,7 @@ end
     false
 end
 @pure function can_guess_column_types(row_type::DataType)
-    !(row_type.abstract || (row_type.name == Tuple.name && isvatuple(row_type)))
+    !(isabstracttype(row_type) || (row_type.name == Tuple.name && isvatuple(row_type)))
 end
 @pure function val_fieldtypes(row_type)
     if can_guess_column_types(row_type)

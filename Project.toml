@@ -1,7 +1,7 @@
 name = "Unzip"
 uuid = "41fe7b60-77ed-43a1-b4f0-825fd5a5650d"
 authors = ["Brandon Taylor <brandon.taylor221@gmail.com> and contributors"]
-version = "0.1.0"
+version = "0.1.1"
 
 [compat]
 julia = "1"

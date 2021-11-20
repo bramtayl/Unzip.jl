@@ -9,7 +9,7 @@ jobs:
     strategy:
       matrix:
         version:
-          - '1.5'
+          - '1'
           - 'nightly'
     steps:
       - uses: actions/checkout@v2
@@ -24,5 +24,3 @@ jobs:
       - uses: codecov/codecov-action@v1
         with:
           file: ./lcov.info
-      - uses: julia-actions/julia-format@master
-        continue-on-error: true

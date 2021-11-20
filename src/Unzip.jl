@@ -36,9 +36,11 @@ end
 end
 
 @inline same_axes() = true
-function same_axes(call, first_column, rest...)
+function same_axes(first_column, rest...)
     all_unrolled(let first_axes = axes(first_column)
-        column -> axes(column) == first_axes
+        function(column)
+            axes(column) == first_axes
+        end
     end, rest...)
 end
 
@@ -46,7 +48,7 @@ struct Rows{Row, Dimensions, Columns} <: AbstractArray{Row, Dimensions}
     columns::Columns
 end
 
-@propagate_inbounds function Rows{Row, Dimension}(
+@inline @propagate_inbounds function Rows{Row, Dimension}(
     columns::Columns,
 ) where {Row, Dimension, Columns}
     @boundscheck if !same_axes(columns...)
@@ -59,24 +61,24 @@ model_column(columns) = first(columns)
 model_column(::Tuple{}) = 1:0
 model_column(rows::Rows) = model_column(rows.columns)
 
-@propagate_inbounds function Rows(columns)
+@inline @propagate_inbounds function Rows(columns)
     Rows{Tuple{map(eltype, columns)...}, ndims(model_column(columns))}(columns)
 end
 
 axes(rows::Rows, dimensions...) = axes(model_column(rows), dimensions...)
 size(rows::Rows, dimensions...) = size(model_column(rows), dimensions...)
 
-@propagate_inbounds function getindex(rows::Rows, an_index...)
+@inline @propagate_inbounds function getindex(rows::Rows, an_index...)
     map(let an_index = an_index
-        @propagate_inbounds function (column)
+        @inline @propagate_inbounds function (column)
             column[an_index...]
         end
     end, rows.columns)
 end
 
-@propagate_inbounds function setindex!(rows::Rows, row, an_index...)
+@inline @propagate_inbounds function setindex!(rows::Rows, row, an_index...)
     map(let an_index = an_index
-        @propagate_inbounds function (column, value)
+        @inline @propagate_inbounds function (column, value)
             column[an_index...] = value
         end
     end, rows.columns, row)
@@ -106,7 +108,7 @@ end
 function similar(rows::Rows, ::Type{ARow}, dimensions::Dims) where {ARow}
     @inbounds Rows(map(
         let model = model_column(rows), dimensions = dimensions
-            function (::Val{Value},) where {Value}
+            @inline @propagate_inbounds function (::Val{Value},) where {Value}
                 similar(model, Value, dimensions)
             end
         end,
@@ -147,7 +149,7 @@ function widen_column(::SizeUnknown, new_length, an_index, column::Array, item)
 end
 
 function widen_column(
-    iterator_size,
+    _,
     new_length,
     an_index,
     ::Missing,
@@ -157,7 +159,7 @@ function widen_column(
     @inbounds new_column[an_index] = item
     new_column
 end
-function widen_column(iterator_size, new_length, an_index, ::Missing, ::Missing)
+function widen_column(_, new_length, __, ::Missing, ::Missing)
     Array{Missing}(missing, new_length)
 end
 
@@ -165,14 +167,27 @@ get_new_length(::SizeUnknown, rows, an_index) = an_index
 get_new_length(::HasLength, rows, an_index) = length(rows)
 
 zip_missing(::Tuple{}, ::Tuple{}) = ()
-zip_missing(::Tuple{}, longer) = map(second_one -> (missing, second_one), longer)
-zip_missing(longer, ::Tuple{}) = map(first_one -> (first_one, missing), longer)
+function zip_missing(::Tuple{}, longer)
+    map(
+        function(second_one)
+            (missing, second_one)
+        end,
+        longer
+    )
+end
+function zip_missing(longer, ::Tuple{})
+    map(
+        function(first_one)
+            (first_one, missing)
+        end,
+        longer
+    )
+end
 function zip_missing(tuple1, tuple2)
     (first(tuple1), first(tuple2)), zip_missing(tail(tuple1), tail(tuple2))...
 end
 
 function widen_columns(iterator_size, rows, row, an_index = length(rows) + 1)
-    columns = rows.columns
     @inbounds Rows(map(
         let iterator_size = iterator_size,
             new_length = get_new_length(iterator_size, rows, an_index),
@@ -251,7 +266,7 @@ function unzip(rows)
         IteratorSize(rows)
     ).columns
 end
-
+rows = [(1,), (2,), (3,), (4,)]
 export unzip
 
 end

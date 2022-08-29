@@ -2,135 +2,112 @@ module Unzip
 
 using Base:
     _collect,
+    collect_to_with_first!,
+    @default_eltype,
+    grow_to!,
     EltypeUnknown,
     HasEltype,
     HasLength,
+    HasShape,
     IteratorEltype,
     IteratorSize,
     isabstracttype,
     isvatuple,
     OneTo,
+    push_widen,
     @propagate_inbounds,
     @pure,
     setindex_widen_up_to,
+    _similar_for,
+    _similar_shape,
     SizeUnknown,
-    tail
+    tail,
+    vect
 
-@inline function all_unrolled(call)
-    true
-end
-@inline function all_unrolled(call, item, rest...)
-    if call(item)
-        all_unrolled(call, rest...)
-    else
-        false
-    end
-end
+include("get_val_fieldtypes.jl")
 
-@inline function same_axes()
-    true
-end
-function same_axes(first_column, rest...)
-    all_unrolled(let first_axes = axes(first_column)
-        function (column)
-            axes(column) == first_axes
-        end
-    end, rest...)
-end
-
-struct Rows{Row, Dimensions, Columns} <: AbstractArray{Row, Dimensions}
+struct Rows{Row, Dimensions, ModelColumn, Columns} <: AbstractArray{Row, Dimensions}
+    model_column::ModelColumn
     columns::Columns
 end
 
-@inline @propagate_inbounds function Rows{Row, Dimension}(
-    columns::Columns,
-) where {Row, Dimension, Columns}
-    @boundscheck if !same_axes(columns...)
-        throw(DimensionMismatch("All arguments to `Rows` must have the same axes"))
+function check_axes(column, model_axes)
+    column_axes = axes(column)
+    if column_axes != model_axes
+        throw(DimensionMismatch("$column does not have model axes $model_axes"))
     end
-    Rows{Row, Dimension, Columns}(columns)
+    nothing
 end
 
-function model_column(columns)
-    first(columns)
-end
-function model_column(::Tuple{})
-    1:0
-end
-function model_column(rows::Rows)
-    model_column(rows.columns)
+@inline @propagate_inbounds function Rows(
+    first_column,
+    other_columns...;
+    model_column = similar(first_column, Nothing),
+)
+    model_axes = axes(model_column)
+    columns = (first_column, other_columns...)
+    @boundscheck map(let model_axes = model_axes
+        column -> check_axes(column, model_axes)
+    end, columns)
+    Rows{
+        Tuple{map(eltype, columns)...},
+        length(model_axes),
+        typeof(model_column),
+        typeof(columns),
+    }(
+        model_column,
+        columns,
+    )
 end
 
-@inline @propagate_inbounds function Rows(columns)
-    Rows{Tuple{map(eltype, columns)...}, ndims(model_column(columns))}(columns)
+# must specify a model column if no other columns
+function Rows(; model_column)
+    Rows{Tuple{}, ndims(model_column), typeof(model_column), Tuple{}}(model_column, ())
 end
 
 function Base.axes(rows::Rows)
-    axes(model_column(rows))
+    axes(rows.model_column)
 end
 function Base.size(rows::Rows)
-    size(model_column(rows))
+    size(rows.model_column)
 end
 
-@inline @propagate_inbounds function Base.getindex(rows::Rows, an_index...)
-    map(let an_index = an_index
+@inline @propagate_inbounds function Base.getindex(rows::Rows, index...)
+    map(let index = index
         @inline @propagate_inbounds function (column)
-            column[an_index...]
+            column[index...]
         end
     end, rows.columns)
 end
 
-@inline @propagate_inbounds function Base.setindex!(rows::Rows, row, an_index...)
-    map(let an_index = an_index
+@inline @propagate_inbounds function Base.setindex!(rows::Rows, row, index...)
+    map(let index = index
         @inline @propagate_inbounds function (column, value)
-            column[an_index...] = value
+            column[index...] = value
         end
     end, rows.columns, row)
     nothing
 end
 
-function Base.push!(rows::Rows, row)
-    map(push!, rows.columns, row)
-    nothing
-end
-
-# can we do any better?
-@pure function can_guess_column_types(_)
-    false
-end
-@pure function can_guess_column_types(row_type::DataType)
-    !(isabstracttype(row_type)) && !(row_type.name == Tuple.name && isvatuple(row_type))
-end
-@pure function val_fieldtypes(row_type)
-    if can_guess_column_types(row_type)
-        map(Val, (row_type.types...,))
-    else
-        ()
-    end
-end
-
 function default_similar(rows, ::Type{ARow}, dimensions) where {ARow}
     @inbounds Rows(
         map(
-            let model = model_column(rows), dimensions = dimensions
-                @inline @propagate_inbounds function (::Val{Value},) where {Value}
+            let model = rows.model_column, dimensions = dimensions
+                function (::Val{Value},) where {Value}
                     similar(model, Value, dimensions)
                 end
             end,
-            val_fieldtypes(ARow),
-        ),
+            get_val_fieldtypes(ARow),
+        )...;
+        model_column = similar(rows.model_column, Nothing, dimensions),
     )
 end
 
 function Base.similar(rows::Rows, ::Type{ARow}, dimensions) where {ARow}
     default_similar(rows, ARow, dimensions)
 end
-function Base.similar(rows::Rows, ::Type{ARow}, dimensions::Dims) where {ARow}
-    default_similar(rows, ARow, dimensions)
-end
 
 # disambiguation methods
-
 const SomeOf{AType} = Tuple{AType, Vararg{AType}} where {AType}
 
 function Base.similar(
@@ -144,6 +121,7 @@ end
 function Base.similar(rows::Rows, ::Type{ARow}, dimensions::SomeOf{Int64}) where {ARow}
     default_similar(rows, ARow, dimensions)
 end
+
 function Base.similar(
     rows::Rows,
     ::Type{ARow},
@@ -157,54 +135,6 @@ function Base.similar(
     dimensions::SomeOf{Union{Integer, AbstractUnitRange}},
 ) where {ARow}
     default_similar(rows, ARow, dimensions)
-end
-
-function Base.empty(column::Rows{OldRow}, ::Type{NewRow} = OldRow) where {OldRow, NewRow}
-    similar(column, NewRow)
-end
-
-function widen_column(
-    ::HasLength,
-    new_length,
-    an_index,
-    column::Array{Element},
-    item::Item,
-) where {Element, Item <: Element}
-    @inbounds column[an_index] = item
-    column
-end
-function widen_column(::HasLength, new_length, an_index, column::Array, item)
-    setindex_widen_up_to(column, item, an_index)
-end
-
-function widen_column(
-    ::SizeUnknown,
-    new_length,
-    an_index,
-    column::Array{Element},
-    item::Item,
-) where {Element, Item <: Element}
-    push!(column, item)
-    column
-end
-function widen_column(::SizeUnknown, new_length, an_index, column::Array, item)
-    push_widen(column, item)
-end
-
-function widen_column(_, new_length, an_index, ::Missing, item::Item) where {Item}
-    new_column = Array{Union{Missing, Item}}(missing, new_length)
-    @inbounds new_column[an_index] = item
-    new_column
-end
-function widen_column(_, new_length, __, ::Missing, ::Missing)
-    Array{Missing}(missing, new_length)
-end
-
-function get_new_length(::SizeUnknown, rows, an_index)
-    an_index
-end
-function get_new_length(::HasLength, rows, an_index)
-    length(rows)
 end
 
 function zip_missing(::Tuple{}, ::Tuple{})
@@ -224,34 +154,81 @@ function zip_missing(tuple1, tuple2)
     (first(tuple1), first(tuple2)), zip_missing(tail(tuple1), tail(tuple2))...
 end
 
-function widen_columns(iterator_size, rows, row, an_index = length(rows) + 1)
+function widen_column(
+    _,
+    next_index,
+    column::Array{OldItem},
+    item::Item,
+) where {OldItem, Item <: OldItem}
+    @inbounds column[next_index] = item
+    column
+end
+function widen_column(_, next_index, column::Array, item)
+    setindex_widen_up_to(column, item, next_index)
+end
+function widen_column(rows, next_index, ::Missing, item::Item) where {Item}
+    new_column = similar(rows.model_column, Union{Missing, Item})
+    @inbounds new_column[next_index] = item
+    new_column
+end
+function widen_column(rows, __, ::Missing, ::Missing)
+    similar(rows.model_column, Missing)
+end
+
+function Base.setindex_widen_up_to(rows::Rows, row, next_index)
     @inbounds Rows(
         map(
-            let iterator_size = iterator_size,
-                new_length = get_new_length(iterator_size, rows, an_index),
-                an_index = an_index
-
+            let rows = rows, next_index = next_index
                 function (column_item,)
-                    widen_column(iterator_size, new_length, an_index, column_item...)
+                    widen_column(rows, next_index, column_item...)
                 end
             end,
             zip_missing(rows.columns, row),
-        ),
+        )...,
     )
 end
 
-function Base.push_widen(rows::Rows, row)
-    widen_columns(SizeUnknown(), rows, row)
+function push_widen_column(
+    _,
+    column::Array{OldItem},
+    item::Item,
+) where {OldItem, Item <: OldItem}
+    push!(column, item)
+    column
+end
+function push_widen_column(_, column::Array, item)
+    push_widen(column, item)
+end
+function push_widen_column(rows, ::Missing, item::Item) where {Item}
+    new_index = length(rows) + 1
+    new_column = Array{Union{Missing, Item}}(missing, new_index)
+    @inbounds new_column[new_index] = item
+    new_column
+end
+function push_widen_column(rows, ::Missing, ::Missing)
+    Array{Missing}(missing, length(rows) + 1)
 end
 
-function Base.setindex_widen_up_to(rows::Rows, row, an_index)
-    widen_columns(HasLength(), rows, row, an_index)
+function Base.push_widen(rows::Rows, row)
+    model_column = rows.model_column
+    # do this before we push into the model column
+    columns = map(let rows = rows
+        function (column_item,)
+            push_widen_column(rows, column_item...)
+        end
+    end, zip_missing(rows.columns, row))
+    model_column = rows.model_column
+    push!(model_column, nothing)
+    @inbounds Rows(columns...; model_column = model_column)
 end
 
 """
     unzip(rows)
 
 Collect into columns.
+
+Will be most performant if each row is a tuple.
+If each row is not a tuple, consider using `unzip(Iterators.map(Tuple, rows))`.
 
 ```jldoctest
 julia> using Unzip
@@ -272,53 +249,107 @@ julia> unstable(x) =
 
 julia> unzip(Iterators.map(unstable, 1:3))
 ([1, 2, 3], [1.0, 2.0, 3.0], Union{Missing, Int64}[missing, 2, missing], Union{Missing, Float64}[missing, 2.0, missing])
-
-julia> unzip(Iterators.filter(row -> true, Iterators.map(unstable, 1:3)))
-([1, 2, 3], [1.0, 2.0, 3.0], Union{Missing, Int64}[missing, 2, missing], Union{Missing, Float64}[missing, 2.0, missing])
-
-julia> unzip(Iterators.filter(row -> false, Iterators.map(unstable, 1:4)))
-()
-
-julia> unzip(x for x in [(1, 2), ("a", "b")])
-(Any[1, "a"], Any[2, "b"])
-
-julia> unzip([(a = 1, b = 2), (a = "a", b = "b")])
-(Any[1, "a"], Any[2, "b"])
 ```
 """
-function unzip(rows)
-    iterator_eltype = IteratorEltype(rows)
+function unzip(row_iterator)
     (
-        _collect(
-            (@inbounds Rows(())),
-            rows,
-            # if we can't guess the column types, ignore the eltype
-            if iterator_eltype isa HasEltype && !can_guess_column_types(eltype(rows))
-                EltypeUnknown()
-            else
-                iterator_eltype
-            end,
-            IteratorSize(rows),
+        collect_rows(
+            row_iterator,
+            IteratorEltype(row_iterator),
+            IteratorSize(row_iterator),
         )::Rows
     ).columns
 end
 
-# taken directly from base, but without the type assert, which is causing problems
-# TODO: fix base
-function Base._collect(c::Rows, itr, ::EltypeUnknown, isz::Union{HasLength, Base.HasShape})
-    et = Base.@default_eltype(itr)
-    shp = Base._similar_shape(itr, isz)
-    y = iterate(itr)
-    if y === nothing
-        return Base._similar_for(c, et, itr, isz, shp)
-    end
-    v1, st = y
-    Base.collect_to_with_first!(
-        Base._similar_for(c, typeof(v1), itr, isz, shp),
-        v1,
-        itr,
-        st,
+# add can guess typetypes to dispatch
+function collect_rows(row_iterator, iterator_eltype::EltypeUnknown, iterator_size)
+    Item = @default_eltype(row_iterator)
+    collect_rows(
+        row_iterator,
+        iterator_eltype,
+        iterator_size,
+        Item,
+        can_guess_fieldtypes(Item),
     )
+end
+
+function collect_rows(row_iterator, iterator_eltype::HasEltype, iterator_size)
+    Item = eltype(row_iterator)
+    collect_rows(
+        row_iterator,
+        iterator_eltype,
+        iterator_size,
+        Item,
+        can_guess_fieldtypes(Item),
+    )
+end
+
+# we can fall back to base if we can guess the fieldtypes
+function collect_rows(row_iterator, iterator_eltype, iterator_size, _, ::Val{true})
+    # don't want to allocate Nothing[]
+    # invalid model column, but that's ok, because this dummy rows won't get used
+    _collect(Rows(; model_column = 1:0), row_iterator, iterator_eltype, iterator_size)
+end
+
+# otherwise, we need to make sure that the eltype never gets used
+function eltype_error(Item)
+    throw(
+        ArgumentError(
+            "Cannot guess the fieldtypes from eltype $Item and the iterator is empty",
+        ),
+    )
+end
+
+function collect_rows(row_iterator, _, iterator_size::SizeUnknown, Item, ::Val{false})
+    row_state = iterate(row_iterator)
+    if row_state === nothing
+        eltype_error(Item)
+    else
+        row, state = row_state
+        grow_to!(
+            (@inbounds Rows(map(vect, row)...; model_column = [nothing])),
+            row_iterator,
+            state,
+        )
+    end
+end
+
+function collect_rows(
+    row_iterator,
+    _,
+    iterator_size::Union{HasLength, HasShape},
+    Item,
+    ::Val{false},
+)
+    shape = _similar_shape(row_iterator, iterator_size)
+    row_state = iterate(row_iterator)
+    if row_state === nothing
+        eltype_error(Item)
+    else
+        row, state = row_state
+        collect_to_with_first!(
+            (@inbounds Rows(
+                map(
+                    let iterator_size = iterator_size, shape = shape
+                        function (item::Item) where {Item}
+                            _similar_for(1:0, Item, row_iterator, iterator_size, shape)
+                        end
+                    end,
+                    row,
+                )...;
+                model_column = _similar_for(
+                    1:0,
+                    Nothing,
+                    row_iterator,
+                    iterator_size,
+                    shape,
+                ),
+            )),
+            row,
+            row_iterator,
+            state,
+        )
+    end
 end
 
 export unzip
